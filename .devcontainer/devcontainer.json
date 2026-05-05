@@ -1,0 +1,31 @@
+{
+  "name": "csci5105-project3",
+  "image": "python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+  /* Installing CPU PyTorch to be significantly smaller */
+  "postCreateCommand": "python -m pip install --root-user-action=ignore -r requirements.txt",
+  /* Add workspace folder as an env variable in the VS Code remote so the expansion of the VSCode var works */
+  "remoteEnv": {
+    "WORKSPACE_FOLDER": "${containerWorkspaceFolder}"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "DrBlury.protobuf-vsc",
+        "bierner.markdown-mermaid"
+      ]
+    }
+  },
+  "containerEnv": {
+    "PYTHONPATH": "$PYTHONPATH:${containerWorkspaceFolder}:${containerWorkspaceFolder}/proto/src",
+    "CONTROLLER_TARGET": "host.docker.internal:50050"
+  }
+}

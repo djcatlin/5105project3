@@ -1,34 +1,63 @@
 syntax = "proto3";
 
+// Client-facing
 service MarketService {
-  rpc CreateItem(CreateItemRequest) returns (CreateItemResponse);
-  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+  rpc CreateItem(CreateItemRequest)   returns (CreateItemResponse);
+  rpc GetItem(GetItemRequest)         returns (GetItemResponse);
   rpc SearchItems(SearchItemsRequest) returns (SearchItemsResponse);
-  rpc UpdateItem(UpdateItemRequest) returns (UpdateItemResponse);
-  rpc PlaceBid(PlaceBidRequest) returns (PlaceBidResponse);
+  rpc UpdateItem(UpdateItemRequest)   returns (UpdateItemResponse);
+  rpc PlaceBid(PlaceBidRequest)       returns (PlaceBidResponse);
   rpc JoinAuction(stream AuctionClientMessage) returns (stream AuctionServerMessage);
 }
 
-service ControllerService {
-  rpc Create(CreateRequest) returns (CreateResponse);
-  rpc Search(SearchRequest) returns (SearchResponse);
-  rpc Get(GetRequest) returns (GetResponse);
-  rpc Update(UpdateRequest) returns (UpdateResponse);
-  rpc StoreBid(StoreBidRequest) returns (StoreBidResponse);
+// Controller dispatches to service nodes
+service ServiceNodeService {
+  rpc HandleCreate(CreateRequest)         returns (CreateResponse);
+  rpc HandleGet(GetRequest)               returns (GetResponse);
+  rpc HandleSearch(SearchRequest)         returns (SearchResponse);
+  rpc HandleUpdate(UpdateRequest)         returns (UpdateResponse);
+  rpc HandleStoreBid(StoreBidRequest)     returns (StoreBidResponse);
+  rpc HandleAuction(ChangeAuctionRequest) returns (ChangeAuctionResponse);
+  rpc Heartbeat(HeartbeatRequest)         returns (HeartbeatResponse);
+}
+
+// Service nodes talk to storage
+service StorageService {
+  rpc Create(CreateRequest)               returns (CreateResponse);
+  rpc Get(GetRequest)                     returns (GetResponse);
+  rpc Search(SearchRequest)               returns (SearchResponse);
+  rpc Update(UpdateRequest)               returns (UpdateResponse);
+  rpc StoreBid(StoreBidRequest)           returns (StoreBidResponse);
   rpc ChangeAuction(ChangeAuctionRequest) returns (ChangeAuctionResponse);
+  rpc Heartbeat(HeartbeatRequest)         returns (HeartbeatResponse);
+}
+
+// ── Enums ────────────────────────────────────────────────────────────
+
+enum ItemStatus {
+  ITEM_UNKNOWN   = 0;
+  ITEM_AVAILABLE = 1;
+  ITEM_SOLD      = 2;
+}
+
+// ── Domain types ─────────────────────────────────────────────────────
+
+message Money {
+  string currency_code = 1;
+  int64  amount_small  = 2;
 }
 
 message Item {
-  string id = 1;
-  string seller_id = 2;
-  string title = 3;
-  string description = 4;
-  Money starting_price = 5;
-  Money current_price = 6;
-  string category = 7;
-  int32  quantity = 8;
-  ItemStatus status = 9;
-  string version = 10;
+  string     id             = 1;
+  string     seller_id      = 2;
+  string     title          = 3;
+  string     description    = 4;
+  Money      starting_price = 5;
+  Money      current_price  = 6;
+  string     category       = 7;
+  int32      quantity       = 8;
+  ItemStatus status         = 9;
+  string     version        = 10;
 }
 
 message Bid {
@@ -39,110 +68,68 @@ message Bid {
   string timestamp = 5;
 }
 
-enum ItemStatus {
-  ITEM_UNKNOWN = 1;
-  ITEM_AVALIABLE = 2;
-  ITEM_SOLD = 3;
-}
+message HeartbeatRequest  {}
+message HeartbeatResponse { bool alive = 1; }
 
-message AuctionDetails {
-  Money reserve_price = 2;
-  Money current_bid = 3;
-  string current_bidder_id = 4;
-}
-
-message Money {
-  string currency_code = 1;
-  int64  amount_small = 2;
-}
+// ── MarketService messages ────────────────────────────────────────────
 
 message CreateItemRequest {
-  string seller_id = 1;
-  string title = 2;
-  string description = 3;
-  string category = 4;
-  int32 quantity = 5;
+  string seller_id      = 1;
+  string title          = 2;
+  string description    = 3;
+  string category       = 4;
+  int32  quantity       = 5;
+  Money  starting_price = 6;
 }
+message CreateItemResponse { Item item = 1; }
 
-message CreateItemResponse {
-  Item item = 1;
-}
-
-message GetItemRequest {
-  string item_id = 1;
-}
-
-message GetItemResponse {
-  Item item = 1;
-}
+message GetItemRequest     { string item_id = 1; }
+message GetItemResponse    { Item item = 1; }
 
 message SearchItemsRequest {
-  string keyword  = 1;
-  string category = 2;
-  ItemStatus status = 3;
-  string seller_id = 4;
-  int32  page_size  = 5;
-  string page_token = 6;
+  string     keyword    = 1;
+  string     category   = 2;
+  ItemStatus status     = 3;
+  string     seller_id  = 4;
+  int32      page_size  = 5;
+  string     page_token = 6;
 }
-
 message SearchItemsResponse {
-  repeated Item items = 1;
-  string next_page_token = 2;
-  int32  total_count = 3;
+  repeated Item items           = 1;
+  string        next_page_token = 2;
+  int32         total_count     = 3;
 }
 
-message SearchRequest {
-  string keyword  = 1;
-  string category = 2;
-  ItemStatus status = 3;
-  string seller_id = 4;
-  int32  page_size  = 5;
-  string page_token = 6;
-}
-
-message SearchResponse {
-  repeated Item items = 1;
-  string next_page_token = 2;
-  int32  total_count = 3;
-}
-
-
-message UpdateItemRequest {
-  string item_id = 1;
-  Item item = 2; // item with new fields
-}
-
-message UpdateItemResponse {
-  Item item = 1;
-}
+message UpdateItemRequest  { string item_id = 1; Item item = 2; }
+message UpdateItemResponse { Item item = 1; }
 
 message PlaceBidRequest {
-  string item_id = 1;
+  string item_id   = 1;
   string bidder_id = 2;
-  Money amount = 3;
+  Money  amount    = 3;
 }
-
 message PlaceBidResponse {
-  Bid bid = 1;
-  Item updated_item = 2; 
+  Bid  bid            = 1;
+  Item updated_item   = 2;
   bool is_winning_bid = 3;
 }
 
 message AuctionClientMessage {
   string item_id = 1;
   oneof action {
-    bool join = 2;
+    bool  join       = 2;
     Money bid_amount = 3;
   }
 }
-
 message AuctionServerMessage {
   string item_id = 1;
   oneof event {
-    Bid new_bid = 2;
+    Bid    new_bid       = 2;
     string status_update = 3;
   }
 }
+
+// ── Shared internal messages ──────────────────────────────────────────
 
 message CreateRequest {
   string seller_id      = 1;
@@ -152,18 +139,10 @@ message CreateRequest {
   int32  quantity       = 5;
   Money  starting_price = 6;
 }
+message CreateResponse { Item item = 1; }
 
-message CreateResponse {
-  Item item = 1;
-}
-
-message GetRequest {
-  string item_id = 1;
-}
-
-message GetResponse {
-  Item item = 1;
-}
+message GetRequest    { string item_id = 1; }
+message GetResponse   { Item item = 1; }
 
 message SearchRequest {
   string     keyword    = 1;
@@ -173,47 +152,37 @@ message SearchRequest {
   int32      page_size  = 5;
   string     page_token = 6;
 }
-
 message SearchResponse {
   repeated Item items           = 1;
   string        next_page_token = 2;
   int32         total_count     = 3;
 }
 
-message UpdateRequest {
-  string item_id = 1;
-  Item item = 2; // item with new fields
-}
-
-message UpdateResponse {
-  Item item = 1;
-}
+message UpdateRequest  { string item_id = 1; Item item = 2; }
+message UpdateResponse { Item item = 1; }
 
 message StoreBidRequest {
-  string item_id = 1;
+  string item_id   = 1;
   string bidder_id = 2;
-  Money amount = 3;
+  Money  amount    = 3;
 }
-
 message StoreBidResponse {
-  Bid bid = 1;
-  Item updated_item = 2; 
+  Bid  bid            = 1;
+  Item updated_item   = 2;
   bool is_winning_bid = 3;
 }
-
 
 message ChangeAuctionRequest {
   string item_id = 1;
   oneof action {
-    bool join = 2;
+    bool  join       = 2;
     Money bid_amount = 3;
   }
 }
-
 message ChangeAuctionResponse {
   string item_id = 1;
   oneof event {
-    Bid new_bid = 2;
+    Bid    new_bid       = 2;
     string status_update = 3;
   }
 }

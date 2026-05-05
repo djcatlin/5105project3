@@ -1,0 +1,102 @@
+name: project3-compose
+
+services:
+
+  controller:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: project3-image:latest
+    container_name: controller
+    hostname: controller
+    command: ["python", "-u", "controller/controller.py"]
+    ports:
+      - "50050:50050"
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      CONTROLLER_PORT: "50050"
+    networks:
+      - project3_net
+    working_dir: /app
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - service-node-1
+      - service-node-2
+
+  service-node-1:
+    image: project3-image:latest
+    container_name: service-node-1
+    hostname: service-node-1
+    command: ["python", "-u", "service/service.py"]
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      GRPC_SERVER_PORT: "50060"
+      NODE_TARGET: "service-node-1:50060"
+    networks:
+      - project3_net
+    working_dir: /app
+    depends_on:
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+
+  service-node-2:
+    image: project3-image:latest
+    container_name: service-node-2
+    hostname: service-node-2
+    command: ["python", "-u", "service/service.py"]
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      GRPC_SERVER_PORT: "50061"
+      NODE_TARGET: "service-node-2:50061"
+    networks:
+      - project3_net
+    working_dir: /app
+    depends_on:
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+
+  storage-node-1:
+    image: project3-image:latest
+    container_name: storage-node-1
+    hostname: storage-node-1
+    command: ["python", "-u", "storage/storage_node.py"]
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      GRPC_SERVER_PORT: "50051"
+      NODE_TARGET: "storage-node-1:50051"
+    networks:
+      - project3_net
+    working_dir: /app
+
+  storage-node-2:
+    image: project3-image:latest
+    container_name: storage-node-2
+    hostname: storage-node-2
+    command: ["python", "-u", "storage/storage_node.py"]
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      GRPC_SERVER_PORT: "50052"
+      NODE_TARGET: "storage-node-2:50052"
+    networks:
+      - project3_net
+    working_dir: /app
+
+  storage-node-3:
+    image: project3-image:latest
+    container_name: storage-node-3
+    hostname: storage-node-3
+    command: ["python", "-u", "storage/storage_node.py"]
+    environment:
+      PYTHONPATH: /app:/app/proto/src
+      GRPC_SERVER_PORT: "50053"
+      NODE_TARGET: "storage-node-3:50053"
+    networks:
+      - project3_net
+    working_dir: /app
+
+networks:
+  project3_net:
+    name: project3_net
