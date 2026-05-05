@@ -1,0 +1,30 @@
+{
+  "name": "csci5105-project3",
+  "image": "python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+  "postCreateCommand": "pip install --root-user-action=ignore -r requirements.txt && mkdir -p proto/src && python -m grpc_tools.protoc -I proto --python_out=proto/src --grpc_python_out=proto/src proto/project3.proto",
+  "remoteEnv": {
+    "WORKSPACE_FOLDER": "${containerWorkspaceFolder}"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "DrBlury.protobuf-vsc",
+        "bierner.markdown-mermaid"
+      ]
+    }
+  },
+  "containerEnv": {
+    "PYTHONPATH": "${containerWorkspaceFolder}:${containerWorkspaceFolder}/proto/src",
+    "CONTROLLER_HOST": "host.docker.internal",
+    "CONTROLLER_PORT": "50050"
+  }
+}
