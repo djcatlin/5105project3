@@ -24,24 +24,31 @@ SERVICE_NODES_INITIAL = [
 
 class ServiceNodeRegistry:
     """
-    Thread-safe registry of live service node targets.
+    Thread-safe registry of live service nodes.
     Supports round-robin dispatch, heartbeat-based failure detection,
     and dynamic registration of new nodes spun up via Docker.
-    Channels are opened fresh per call — no persistent stubs stored.
+    Stubs are created at registration time and reused — including for
+    nodes added dynamically by autoscaling.
     """
 
     def __init__(self, targets: list[str]) -> None:
-        self.lock           = threading.Lock()
-        self.targets        = list(targets)
-        self.healthy        = set()
-        self.rr_idx         = 0
-
+        self.lock    = threading.Lock()
+        self.targets = list(targets)
+        self.healthy = set()
+        self.rr_idx  = 0
+        self.stubs   = {
+            t: project3_pb2_grpc.ServiceNodeServiceStub(grpc.insecure_channel(t))
+            for t in targets
+        }
         for target in targets:
             print(f"[registry] registered {target}")
 
     def register(self, target: str) -> None:
         with self.lock:
-            if target not in self.targets:
+            if target not in self.stubs:
+                self.stubs[target] = project3_pb2_grpc.ServiceNodeServiceStub(
+                    grpc.insecure_channel(target)
+                )
                 self.targets.append(target)
                 print(f"[registry] registered {target}")
 
@@ -55,15 +62,15 @@ class ServiceNodeRegistry:
                 print(f"[registry] {target} marked dead")
                 self.healthy.discard(target)
 
-    def pick_target(self) -> str | None:
-        """Round-robin over healthy nodes; returns a target string or None."""
+    def pick_stub(self) -> project3_pb2_grpc.ServiceNodeServiceStub | None:
+        """Round-robin over healthy nodes; returns a persistent stub or None."""
         with self.lock:
             healthy_targets = [t for t in self.targets if t in self.healthy]
             if not healthy_targets:
                 return None
             target = healthy_targets[self.rr_idx % len(healthy_targets)]
             self.rr_idx += 1
-            return target
+            return self.stubs[target]
 
     def healthy_count(self) -> int:
         with self.lock:
@@ -76,9 +83,9 @@ class ServiceNodeRegistry:
 
 registry: ServiceNodeRegistry = None
 docker_client: docker.DockerClient = None
-inflight       = 0
-inflight_lock  = threading.Lock()
-last_scale     = 0.0
+inflight      = 0
+inflight_lock = threading.Lock()
+last_scale    = 0.0
 
 
 def scale_up() -> None:
@@ -88,10 +95,10 @@ def scale_up() -> None:
         return
     last_scale = now
 
-    existing  = docker_client.containers.list(filters={"name": "service-node-"})
-    node_num  = len(existing) + 1
-    new_port  = 50060 + node_num - 1
-    new_name  = f"service-node-{node_num}"
+    existing   = docker_client.containers.list(filters={"name": "service-node-"})
+    node_num   = len(existing) + 1
+    new_port   = 50060 + node_num - 1
+    new_name   = f"service-node-{node_num}"
     new_target = f"{new_name}:{new_port}"
 
     print(f"[autoscale] scaling up → {new_name} on port {new_port}")
@@ -151,9 +158,7 @@ def heartbeat_loop() -> None:
     while True:
         for target in registry.all_targets():
             try:
-                with grpc.insecure_channel(target) as channel:
-                    stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                    stub.Heartbeat(HeartbeatRequest(), timeout=2)
+                registry.stubs[target].Heartbeat(HeartbeatRequest(), timeout=2)
                 registry.mark_healthy(target)
             except grpc.RpcError:
                 registry.mark_dead(target)
@@ -175,57 +180,51 @@ class InFlight:
 
 class MarketService(project3_pb2_grpc.MarketServiceServicer):
 
-    def _pick_target(self, context: grpc.ServicerContext) -> str | None:
-        target = registry.pick_target()
-        if target is None:
+    def _pick_stub(self, context: grpc.ServicerContext) -> project3_pb2_grpc.ServiceNodeServiceStub | None:
+        stub = registry.pick_stub()
+        if stub is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
             context.set_details("No healthy service nodes available")
-        return target
+        return stub
 
     def CreateItem(self, request: CreateItemRequest, context: grpc.ServicerContext) -> CreateItemResponse:
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return CreateItemResponse()
-            with grpc.insecure_channel(target) as channel:
-                stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                resp: CreateResponse = stub.HandleCreate(CreateRequest(
-                    seller_id=request.seller_id,
-                    title=request.title,
-                    description=request.description,
-                    category=request.category,
-                    quantity=request.quantity,
-                    starting_price=request.starting_price,
-                ))
+            resp: CreateResponse = stub.HandleCreate(CreateRequest(
+                seller_id=request.seller_id,
+                title=request.title,
+                description=request.description,
+                category=request.category,
+                quantity=request.quantity,
+                starting_price=request.starting_price,
+            ))
             return CreateItemResponse(item=resp.item)
 
     def GetItem(self, request: GetItemRequest, context: grpc.ServicerContext) -> GetItemResponse:
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return GetItemResponse()
             print(f"[controller] GetItem item_id={request.item_id}")
-            with grpc.insecure_channel(target) as channel:
-                stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                resp: GetResponse = stub.HandleGet(GetRequest(item_id=request.item_id))
+            resp: GetResponse = stub.HandleGet(GetRequest(item_id=request.item_id))
             return GetItemResponse(item=resp.item)
 
     def SearchItems(self, request: SearchItemsRequest, context: grpc.ServicerContext) -> SearchItemsResponse:
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return SearchItemsResponse()
             print(f"[controller] SearchItems keyword={request.keyword!r}")
-            with grpc.insecure_channel(target) as channel:
-                stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                resp: SearchResponse = stub.HandleSearch(SearchRequest(
-                    keyword=request.keyword,
-                    category=request.category,
-                    status=request.status,
-                    seller_id=request.seller_id,
-                    page_size=request.page_size,
-                    page_token=request.page_token,
-                ))
+            resp: SearchResponse = stub.HandleSearch(SearchRequest(
+                keyword=request.keyword,
+                category=request.category,
+                status=request.status,
+                seller_id=request.seller_id,
+                page_size=request.page_size,
+                page_token=request.page_token,
+            ))
             return SearchItemsResponse(
                 items=resp.items,
                 next_page_token=resp.next_page_token,
@@ -234,31 +233,27 @@ class MarketService(project3_pb2_grpc.MarketServiceServicer):
 
     def UpdateItem(self, request: UpdateItemRequest, context: grpc.ServicerContext) -> UpdateItemResponse:
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return UpdateItemResponse()
             print(f"[controller] UpdateItem item_id={request.item_id}")
-            with grpc.insecure_channel(target) as channel:
-                stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                resp: UpdateResponse = stub.HandleUpdate(UpdateRequest(
-                    item_id=request.item_id,
-                    item=request.item,
-                ))
+            resp: UpdateResponse = stub.HandleUpdate(UpdateRequest(
+                item_id=request.item_id,
+                item=request.item,
+            ))
             return UpdateItemResponse(item=resp.item)
 
     def PlaceBid(self, request: PlaceBidRequest, context: grpc.ServicerContext) -> PlaceBidResponse:
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return PlaceBidResponse()
             print(f"[controller] PlaceBid item_id={request.item_id} bidder={request.bidder_id}")
-            with grpc.insecure_channel(target) as channel:
-                stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                resp: StoreBidResponse = stub.HandleStoreBid(StoreBidRequest(
-                    item_id=request.item_id,
-                    bidder_id=request.bidder_id,
-                    amount=request.amount,
-                ))
+            resp: StoreBidResponse = stub.HandleStoreBid(StoreBidRequest(
+                item_id=request.item_id,
+                bidder_id=request.bidder_id,
+                amount=request.amount,
+            ))
             return PlaceBidResponse(
                 bid=resp.bid,
                 updated_item=resp.updated_item,
@@ -267,8 +262,8 @@ class MarketService(project3_pb2_grpc.MarketServiceServicer):
 
     def JoinAuction(self, request_iterator, context: grpc.ServicerContext):
         with InFlight():
-            target = self._pick_target(context)
-            if target is None:
+            stub = self._pick_stub(context)
+            if stub is None:
                 return
             for client_msg in request_iterator:
                 req = ChangeAuctionRequest(item_id=client_msg.item_id)
@@ -276,9 +271,7 @@ class MarketService(project3_pb2_grpc.MarketServiceServicer):
                     req.join = client_msg.join
                 elif client_msg.HasField("bid_amount"):
                     req.bid_amount.CopyFrom(client_msg.bid_amount)
-                with grpc.insecure_channel(target) as channel:
-                    stub = project3_pb2_grpc.ServiceNodeServiceStub(channel)
-                    resp: ChangeAuctionResponse = stub.HandleAuction(req)
+                resp: ChangeAuctionResponse = stub.HandleAuction(req)
                 server_msg = AuctionServerMessage(item_id=resp.item_id)
                 if resp.HasField("new_bid"):
                     server_msg.new_bid.CopyFrom(resp.new_bid)
