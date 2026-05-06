@@ -4,11 +4,11 @@ import time
 import os
 
 import grpc
-import project3_pb2 as pb
-import project3_pb2_grpc as pb_grpc
+from project3_pb2 import *
+import project3_pb2_grpc
 
-GRPC_SERVER_PORT = os.environ.get("GRPC_SERVER_PORT", "50060")
-NODE_TARGET      = os.environ.get("NODE_TARGET", f"service-node:{GRPC_SERVER_PORT}")
+GRPC_SERVER_PORT   = os.environ.get("GRPC_SERVER_PORT", "50060")
+NODE_TARGET        = os.environ.get("NODE_TARGET", f"service-node:{GRPC_SERVER_PORT}")
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "5"))
 
 STORAGE_NODES = [
@@ -19,55 +19,48 @@ STORAGE_NODES = [
 
 
 class StorageRegistry:
-    """Thread-safe primary-backup registry for storage replicas."""
+    """
+    Thread-safe primary-backup registry for storage replicas.
+    Channels are opened fresh per call — no persistent stubs stored.
+    """
 
     def __init__(self, targets: list[str]) -> None:
-        self._lock    = threading.Lock()
-        self._nodes   = {
-            t: {
-                "healthy": False,
-                "stub": pb_grpc.StorageServiceStub(grpc.insecure_channel(t)),
-            }
-            for t in targets
-        }
-        self._targets = targets
-        self._primary = None
+        self.lock           = threading.Lock()
+        self.targets        = list(targets)
+        self.healthy        = set()
+        self.primary_target = None
 
     def mark_healthy(self, target: str) -> None:
-        with self._lock:
-            self._nodes[target]["healthy"] = True
-            if self._primary is None:
-                self._primary = target
+        with self.lock:
+            self.healthy.add(target)
+            if self.primary_target is None:
+                self.primary_target = target
                 print(f"[service:{NODE_TARGET}] primary storage = {target}")
 
     def mark_dead(self, target: str) -> None:
-        with self._lock:
-            if self._nodes[target]["healthy"]:
+        with self.lock:
+            if target in self.healthy:
                 print(f"[service:{NODE_TARGET}] storage {target} marked dead")
-            self._nodes[target]["healthy"] = False
-            if self._primary == target:
-                self._primary = next(
-                    (t for t in self._targets if self._nodes[t]["healthy"]), None
+            self.healthy.discard(target)
+            if self.primary_target == target:
+                self.primary_target = next(
+                    (t for t in self.targets if t in self.healthy), None
                 )
-                print(f"[service:{NODE_TARGET}] primary failed over to {self._primary}")
+                print(f"[service:{NODE_TARGET}] primary failed over to {self.primary_target}")
 
-    def primary(self) -> pb_grpc.StorageServiceStub | None:
-        with self._lock:
-            if self._primary and self._nodes[self._primary]["healthy"]:
-                return self._nodes[self._primary]["stub"]
+    def get_primary_target(self) -> str | None:
+        with self.lock:
+            if self.primary_target and self.primary_target in self.healthy:
+                return self.primary_target
             return None
 
-    def backups(self) -> list[pb_grpc.StorageServiceStub]:
-        with self._lock:
-            return [
-                info["stub"]
-                for t, info in self._nodes.items()
-                if info["healthy"] and t != self._primary
-            ]
+    def get_backup_targets(self) -> list[str]:
+        with self.lock:
+            return [t for t in self.targets if t in self.healthy and t != self.primary_target]
 
     def all_targets(self) -> list[str]:
-        with self._lock:
-            return list(self._targets)
+        with self.lock:
+            return list(self.targets)
 
 
 storage: StorageRegistry = None
@@ -77,8 +70,9 @@ def heartbeat_loop() -> None:
     while True:
         for target in storage.all_targets():
             try:
-                stub = pb_grpc.StorageServiceStub(grpc.insecure_channel(target))
-                stub.Heartbeat(pb.HeartbeatRequest(), timeout=2)
+                with grpc.insecure_channel(target) as channel:
+                    stub = project3_pb2_grpc.StorageServiceStub(channel)
+                    stub.Heartbeat(HeartbeatRequest(), timeout=2)
                 storage.mark_healthy(target)
             except grpc.RpcError:
                 storage.mark_dead(target)
@@ -86,78 +80,95 @@ def heartbeat_loop() -> None:
 
 
 def replicate(method: str, request) -> None:
-    """Fan write out to all backup replicas in parallel threads."""
-    def _send(stub):
+    def _send(target: str) -> None:
         try:
-            getattr(stub, method)(request)
+            with grpc.insecure_channel(target) as channel:
+                stub = project3_pb2_grpc.StorageServiceStub(channel)
+                getattr(stub, method)(request)
         except grpc.RpcError as e:
-            print(f"[service:{NODE_TARGET}] replication error {method}: {e.details()}")
+            print(f"[service:{NODE_TARGET}] replication error to {target} {method}: {e.details()}")
 
     threads = [
-        threading.Thread(target=_send, args=(s,), daemon=True)
-        for s in storage.backups()
+        threading.Thread(target=_send, args=(t,), daemon=True)
+        for t in storage.get_backup_targets()
     ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=3)
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
 
 
-class ServiceNodeService(pb_grpc.ServiceNodeServiceServicer):
+class ServiceNodeService(project3_pb2_grpc.ServiceNodeServiceServicer):
 
-    def Heartbeat(self, request: pb.HeartbeatRequest, context: grpc.ServicerContext) -> pb.HeartbeatResponse:
-        return pb.HeartbeatResponse(alive=True)
-
-    def HandleCreate(self, request: pb.CreateRequest, context: grpc.ServicerContext) -> pb.CreateResponse:
-        primary = storage.primary()
-        if primary is None:
+    def _get_primary_target(self, context: grpc.ServicerContext) -> str | None:
+        target = storage.get_primary_target()
+        if target is None:
             context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.CreateResponse()
-        resp = primary.Create(request)
+            context.set_details("No healthy storage nodes available")
+        return target
+
+    def Heartbeat(self, request: HeartbeatRequest, context: grpc.ServicerContext) -> HeartbeatResponse:
+        return HeartbeatResponse(alive=True)
+
+    def HandleCreate(self, request: CreateRequest, context: grpc.ServicerContext) -> CreateResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return CreateResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: CreateResponse = stub.Create(request)
         replicate("Create", request)
         print(f"[service:{NODE_TARGET}] HandleCreate id={resp.item.id}")
         return resp
 
-    def HandleGet(self, request: pb.GetRequest, context: grpc.ServicerContext) -> pb.GetResponse:
-        primary = storage.primary()
-        if primary is None:
-            context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.GetResponse()
-        return primary.Get(request)
+    def HandleGet(self, request: GetRequest, context: grpc.ServicerContext) -> GetResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return GetResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: GetResponse = stub.Get(request)
+        return resp
 
-    def HandleSearch(self, request: pb.SearchRequest, context: grpc.ServicerContext) -> pb.SearchResponse:
-        primary = storage.primary()
-        if primary is None:
-            context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.SearchResponse()
-        return primary.Search(request)
+    def HandleSearch(self, request: SearchRequest, context: grpc.ServicerContext) -> SearchResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return SearchResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: SearchResponse = stub.Search(request)
+        return resp
 
-    def HandleUpdate(self, request: pb.UpdateRequest, context: grpc.ServicerContext) -> pb.UpdateResponse:
-        primary = storage.primary()
-        if primary is None:
-            context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.UpdateResponse()
-        resp = primary.Update(request)
+    def HandleUpdate(self, request: UpdateRequest, context: grpc.ServicerContext) -> UpdateResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return UpdateResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: UpdateResponse = stub.Update(request)
         replicate("Update", request)
         print(f"[service:{NODE_TARGET}] HandleUpdate id={request.item_id}")
         return resp
 
-    def HandleStoreBid(self, request: pb.StoreBidRequest, context: grpc.ServicerContext) -> pb.StoreBidResponse:
-        primary = storage.primary()
-        if primary is None:
-            context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.StoreBidResponse()
-        resp = primary.StoreBid(request)
+    def HandleStoreBid(self, request: StoreBidRequest, context: grpc.ServicerContext) -> StoreBidResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return StoreBidResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: StoreBidResponse = stub.StoreBid(request)
         replicate("StoreBid", request)
         print(f"[service:{NODE_TARGET}] HandleStoreBid item={request.item_id} winning={resp.is_winning_bid}")
         return resp
 
-    def HandleAuction(self, request: pb.ChangeAuctionRequest, context: grpc.ServicerContext) -> pb.ChangeAuctionResponse:
-        primary = storage.primary()
-        if primary is None:
-            context.set_code(grpc.StatusCode.UNAVAILABLE)
-            return pb.ChangeAuctionResponse()
-        return primary.ChangeAuction(request)
+    def HandleAuction(self, request: ChangeAuctionRequest, context: grpc.ServicerContext) -> ChangeAuctionResponse:
+        target = self._get_primary_target(context)
+        if target is None:
+            return ChangeAuctionResponse()
+        with grpc.insecure_channel(target) as channel:
+            stub = project3_pb2_grpc.StorageServiceStub(channel)
+            resp: ChangeAuctionResponse = stub.ChangeAuction(request)
+        return resp
 
 
 def serve() -> None:
@@ -168,7 +179,7 @@ def serve() -> None:
     print(f"[service:{NODE_TARGET}] heartbeat thread started")
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
-    pb_grpc.add_ServiceNodeServiceServicer_to_server(ServiceNodeService(), server)
+    project3_pb2_grpc.add_ServiceNodeServiceServicer_to_server(ServiceNodeService(), server)
     server.add_insecure_port(f"[::]:{GRPC_SERVER_PORT}")
     server.start()
     print(f"[service:{NODE_TARGET}] listening on port {GRPC_SERVER_PORT}")

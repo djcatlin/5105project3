@@ -3,11 +3,12 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    image: project3-image:latest
     container_name: controller
     command: ["python", "-u", "controller/controller.py"]
-    ports: 
+    ports:
       - "50050:50050"
-    volumes: 
+    volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
     environment:
       SCALE_UP_THRESHOLD: "10"
@@ -17,16 +18,32 @@ services:
 
   service-node-1:
     image: project3-image:latest
+    container_name: service-node-1
+    hostname: service-node-1
     command: ["python", "-u", "service/service.py"]
     environment:
       GRPC_SERVER_PORT: "50060"
+      NODE_TARGET: "service-node-1:50060"
+    networks: ["project3_net"]
+
+  service-node-2:
+    image: project3-image:latest
+    container_name: service-node-2
+    hostname: service-node-2
+    command: ["python", "-u", "service/service.py"]
+    environment:
+      GRPC_SERVER_PORT: "50061"
+      NODE_TARGET: "service-node-2:50061"
     networks: ["project3_net"]
 
   storage-node-1:
     image: project3-image:latest
+    container_name: storage-node-1
+    hostname: storage-node-1
     command: ["python", "-u", "storage/storage_node.py"]
     environment:
       GRPC_SERVER_PORT: "50051"
+      NODE_TARGET: "storage-node-1:50051"
     networks: ["project3_net"]
 
 networks:
